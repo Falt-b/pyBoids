@@ -1,246 +1,235 @@
 import pygame
 import numpy as np
+from math import floor, ceil, sqrt
 from random import randint
+from sys import exit
 
-BOIDS = int(input("Number of Boids: "))
+WIDTH = 1800
+HEIGHT = 1000
+FPS = 60
+BG_COLOR = (20, 20, 20)
+COLOR_PALLETTE = (
+    (255, 204, 102),
+    (122, 255, 102),
+    (102, 255, 230),
+    (102, 133, 255),
+    (194, 102, 255),
+    (255, 102, 201),
+    (255, 102, 102),
+)
+MAX_SPEED = 5
+NUM_BOIDS = 250
+MAX_FLOCK_SIZE = 10
+EDGE_DISTANCE = 100
+TURNING_FORCE = 0.25
 
 
-class OBJ:
-    def __init__(self, pos, size) -> None:
-        self.pos = np.array(pos, dtype=np.float64)
-        self.size = size
-        self.hSize = (self.size[0] / 2, self.size[1] / 2)
+class Hash_Map:
+    def __init__(self, container_size: int, map_width: int) -> None:
+        self.container_size = container_size
+        self.width = ceil(map_width / container_size)
+        self.objects = {}
 
-    def _contains(self, obj) -> bool:
-        if (
-            obj.pos[0] > self.pos[0]
-            and obj.pos[0] < self.pos[0] + self.size[0]
-            and obj.pos[1] > self.pos[1]
-            and obj.pos[1] < self.pos[1] + self.size[1]
-        ):
-            return True
-        return False
-
-
-class QUADTREE:
-    def __init__(self, pos, size, capacity) -> None:
-        self.pos = pos
-        self.size = size
-        self.hSize = (self.size[0] / 2, self.size[1] / 2)
-        self.capacity = capacity
-        self.children = {}
-        self.divided = False
-        self.items = []
-
-    def _contains(self, obj) -> bool:
-        if (
-            obj.pos[0] > self.pos[0]
-            and obj.pos[0] < self.pos[0] + self.size[0]
-            and obj.pos[1] > self.pos[1]
-            and obj.pos[1] < self.pos[1] + self.size[1]
-        ):
-            return True
-        return False
-
-    def _intersects(self, other):
-        if (
-            self.pos[0] < other.pos[0] + other.size[0]
-            and self.pos[0] + self.size[0] > other.pos[0]
-            and self.pos[1] < other.pos[1] + other.size[1]
-            and self.pos[1] + self.size[1] > other.pos[1]
-        ):
-            return True
-        return False
-
-    def _sub_divide(self) -> None:
-        self.divided = True
-        self.children["NW"] = QUADTREE(self.pos, self.hSize, self.capacity)
-        self.children["NE"] = QUADTREE(
-            (self.pos[0] + self.hSize[0], self.pos[1]), self.hSize, self.capacity
-        )
-        self.children["SW"] = QUADTREE(
-            (self.pos[0], self.pos[1] + self.hSize[1]), self.hSize, self.capacity
-        )
-        self.children["SE"] = QUADTREE(
-            (self.pos[0] + self.hSize[0], self.pos[1] + self.hSize[1]),
-            self.hSize,
-            self.capacity,
+    def hash_vector(self, position: pygame.Vector2):
+        return (
+            floor(position.x / self.container_size)
+            + floor(position.y / self.container_size) * self.width
         )
 
-    def _insert(self, obj) -> bool:
-        if self._contains(obj):
-            if len(self.items) < self.capacity:
-                self.items.append(obj)
-                return True
-            if not self.divided:
-                self._sub_divide()
-            return (
-                self.children["NW"]._insert(obj)
-                or self.children["NE"]._insert(obj)
-                or self.children["SW"]._insert(obj)
-                or self.children["SE"]._insert(obj)
+    def get_rect_dimensions(self, rect: pygame.Rect):
+        topleft = (
+            floor(rect.topleft[0] / self.container_size),
+            floor(rect.topleft[1] / self.container_size),
+        )
+        return (
+            floor(rect.topright[0] / self.container_size) - topleft[0] + 1,  # x
+            floor(rect.bottomleft[1] / self.container_size) - topleft[1] + 1,  # y
+            topleft[0] + (topleft[1] * self.width),  # topleft position
+        )
+
+    def insert_object(self, object: object, hash: int):
+        if hash in self.objects:
+            self.objects[hash].append(object)
+        else:
+            self.objects.setdefault(hash, [object])
+
+    def insert_rect(self, object: object):
+        # assumes object has rect in class
+        dimensions = self.get_rect_dimensions(object.rect)
+        for y in range(dimensions[1]):
+            for x in range(dimensions[0]):
+                self.objects[dimensions[2] + x + (y * self.width)].append(object)
+
+    def remove_object(self, object: object, hash: int):
+        # assumes that hash is known and object is already in list
+        self.objects[hash].remove(object)
+        if len(self.objects[hash]) == 0:
+            del self.objects[hash]
+
+    def remove_rect(self, object: object):
+        # assumes object has rect in class
+        dimensions = self.get_rect_dimensions(object.rect)
+        for y in range(dimensions[1]):
+            for x in range(dimensions[0]):
+                self.remove_object(
+                    object, [dimensions[2] + x + (y * self.width)].remove(object)
+                )
+
+    def query(self, hash: int):
+        if hash in self.objects:
+            return self.objects[hash]
+        return []
+
+    def query_rect(self, rect: pygame.Rect):
+        found_objects = []
+        dimensions = self.get_rect_dimensions(rect)
+        for y in range(dimensions[1]):
+            for x in range(dimensions[0]):
+                found_objects += self.query(dimensions[2] + x + (y * self.width))
+        return found_objects
+
+
+class Boid(pygame.sprite.Sprite):
+    def __init__(
+        self,
+        position: pygame.Vector2,
+        color: tuple,
+        fill: int,
+        map: Hash_Map,
+        sight_range: int,
+        *groups
+    ) -> None:
+        super().__init__(*groups)
+        self.image = pygame.Surface((18, 10)).convert()
+        self.image.fill((0, 0, 0))
+        self.image.set_colorkey((0, 0, 0))
+        pygame.draw.polygon(self.image, color, ((0, 0), (18, 5), (0, 10), (2, 5)), fill)
+        self.original_image = self.image.copy().convert()
+        self.rect = self.image.get_rect(center=position)
+        self.sight_rect = pygame.Rect(
+            sight_range / 2, sight_range / 2, sight_range, sight_range
+        )
+        self.hash = map.hash_vector(position)
+        map.insert_object(self, self.hash)
+        self.position = position
+        self.vel = pygame.Vector2((randint(-3, 3), randint(-3, 3)))
+
+    def update(self, map: Hash_Map, surface: pygame.Surface) -> None:
+        alignment = pygame.Vector2()
+        cohesion = pygame.Vector2()
+        seperation = pygame.Vector2()
+        found_boids = []
+        for boid in map.query_rect(self.sight_rect):
+            if (
+                boid != self
+                and self.sight_rect.collidepoint(boid.position.x, boid.position.y)
+                and len(found_boids) < MAX_FLOCK_SIZE
+            ):
+                found_boids.append(
+                    (
+                        self.position.distance_squared_to(boid.position),
+                        boid.position.x,
+                        boid.position.y,
+                    )
+                )
+                alignment += boid.vel
+                cohesion += boid.position
+        if len(found_boids) > 0:
+            alignment = alignment / len(found_boids)
+            alignment = alignment / (np.linalg.norm(alignment) + 0.1)
+            cohesion = cohesion / len(found_boids) - self.position
+            cohesion = ((cohesion / np.linalg.norm(cohesion)) - self.vel) * 0.05
+            found_boids.sort(key=lambda item: item[0])
+            seperation = (
+                self.position
+                - pygame.Vector2(found_boids[0][1], found_boids[0][2])
+                - self.vel
             )
-        return False
-
-    def _query(self, other):
-        found = []
-        if self._intersects(other):
-            found = [p for i, p in enumerate(self.items) if other._contains(p)]
-            if self.divided:
-                return (
-                    found
-                    + self.children["NW"]._query(other)
-                    + self.children["NE"]._query(other)
-                    + self.children["SW"]._query(other)
-                    + self.children["SE"]._query(other)
-                )
-        return found
-
-
-class BOID(OBJ):
-    def __init__(self, pos, size, color=(0, 0, 0)) -> None:
-        super().__init__(pos, size)
-        self.vel = np.array([randint(-5, 5), randint(-5, 5)], dtype=np.float64)
-        self.accel = np.array(
-            [randint(-5, 5) * 0.1, randint(-5, 5) * 0.1], dtype=np.float64
+            seperation = (
+                seperation
+                / np.linalg.norm(seperation)
+                * (40 - sqrt(found_boids[0][0]))
+                * 0.02
+            )  # 0.15
+        self.vel += alignment + cohesion + seperation
+        if self.position.x > WIDTH - EDGE_DISTANCE:
+            self.vel.x -= TURNING_FORCE
+        if self.position.x < EDGE_DISTANCE:
+            self.vel.x += TURNING_FORCE
+        if self.position.y > HEIGHT - EDGE_DISTANCE:
+            self.vel.y -= TURNING_FORCE
+        if self.position.y < EDGE_DISTANCE:
+            self.vel.y += TURNING_FORCE
+        norm_vel = np.linalg.norm(self.vel)
+        if norm_vel > MAX_SPEED:
+            self.vel = self.vel / norm_vel * MAX_SPEED
+        self.position += self.vel
+        new_hash = map.hash_vector(self.position)
+        if new_hash != self.hash:
+            map.remove_object(self, self.hash)
+            map.insert_object(self, new_hash)
+            self.hash = new_hash
+        self.image = pygame.transform.rotate(
+            self.original_image, pygame.Vector2().angle_to(self.vel) * -1
         )
-        self.points = [
-            (self.pos[0] - self.hSize[0], self.pos[1] + self.hSize[1]),
-            (self.pos[0], self.pos[1] - self.hSize[1]),
-            (self.pos[0] + self.hSize[0], self.pos[1] + self.hSize[1]),
-            (self.pos[0], self.pos[1] + self.hSize[1] - 5),
-        ]
-        self.angle = 0
-        self.max = randint(7, 9)
-        self.color = color
+        self.rect = self.image.get_rect(center=self.position)
+        self.sight_rect.center = self.position
 
-    def update(self, flock, dist, maxX, maxY, turningForce=1):
-        f = len(flock)
-        if f > 1:
-            b = np.array(self.get_flock(flock), object)
-            d = np.argsort(b[:, 0])[:1]
-            center = np.divide(np.sum(b[:, 1]), f) - self.pos - self.vel
-            avoidance = self.pos - b[d[0], 1] - self.vel
-            self.accel += (
-                np.multiply(
-                    np.multiply(
-                        np.divide(
-                            avoidance,
-                            np.sqrt(np.einsum("...i, ...i", avoidance, avoidance)),
-                        ),
-                        60 - np.sqrt(b[d[0], 0]),
-                    ),
-                    0.03,
-                )
-                + np.multiply(
-                    np.divide(center, np.sqrt(np.einsum("...i, ...i", center, center))),
-                    0.06,
-                )
-                + np.multiply(np.divide(np.sum(b[:, 2]), f), 0.4)
-            )
-        if 0 + self.pos[0] < dist:
-            self.vel[0] += turningForce
-        if maxX - self.pos[0] < dist:
-            self.vel[0] -= turningForce
-        if 0 + self.pos[1] < dist:
-            self.vel[1] += turningForce
-        if maxY - self.pos[1] < dist:
-            self.vel[1] -= turningForce
-        self.vel += self.accel
-        self.pos += self.vel
-        self.points = [
-            (self.pos[0] - self.hSize[0], self.pos[1] + self.hSize[1]),
-            (self.pos[0], self.pos[1] - self.hSize[1]),
-            (self.pos[0] + self.hSize[0], self.pos[1] + self.hSize[1]),
-        ]
-        self.angle = pygame.Vector2(0, 0).angle_to(self.vel) + 90
-        n = np.sqrt(np.einsum("...i, ...i", self.vel, self.vel))
-        if n > 5:
-            self.vel = np.multiply(np.divide(self.vel, n), 5)
-        self.accel = np.array([0, 0], np.float16)
 
-    def get_flock(self, flock):
-        elements = []
-        for boid in flock:
-            d = (self.pos[0] - boid.pos[0]) ** 2 + (self.pos[1] - boid.pos[1]) ** 2
-            if boid != self and d < 14400:
-                elements.append((d, boid.pos, boid.vel))
-        return elements
-
-    def rotate(self, points, angle):
-        rads = np.deg2rad(angle)
-        c = np.cos(rads)
-        s = np.sin(rads)
-        rp = []
-        for p in points:
-            rp.append(
-                (
-                    np.trunc(
-                        np.multiply(c, (p[0] - self.pos[0]))
-                        - np.multiply(s, (p[1] - self.pos[1]))
-                        + self.pos[0]
-                    ),
-                    np.trunc(
-                        np.multiply(s, (p[0] - self.pos[0]))
-                        + np.multiply(c, (p[1] - self.pos[1]))
-                        + self.pos[1]
-                    ),
-                )
-            )
-        return rp
-
-    def draw(self, surface):
-        pygame.draw.polygon(
-            surface, self.color, self.rotate(self.points, self.angle), width=0
+def generate_flock(
+    max_pos: tuple,
+    min_pos: tuple,
+    color_pallette: list,
+    fill: int,
+    hash_map: Hash_Map,
+    group: pygame.sprite.Group,
+    num_boids: int,
+):
+    for i in range(num_boids):
+        Boid(
+            pygame.Vector2(
+                (randint(min_pos[0], max_pos[0]), randint(min_pos[1], max_pos[1]))
+            ),
+            color_pallette[randint(0, len(color_pallette) - 1)],
+            fill,
+            hash_map,
+            100,
+            group,
         )
 
 
 def main():
-    w, h = 1920, 960
-    FPS = 30
-    bgColor = (20, 20, 20)
-    pygame.font.init()
-    pallette = [
-        (174, 167, 209),
-        (225, 194, 217),
-        (251, 249, 226),
-        (215, 235, 209),
-        (177, 216, 207),
-    ]
-    screen = pygame.display.set_mode((w, h))
-    pygame.display.set_caption("Boids Basic")
+    pygame.init()
+    display = pygame.display.set_mode((WIDTH, HEIGHT))
+    pygame.display.set_caption("Boids")
     clock = pygame.time.Clock()
-    last_update = pygame.time.get_ticks()
-    Q = QUADTREE((0, 0), (w, h), 6)
-    t = []
-    for i in range(BOIDS):
-        b = BOID(
-            (randint(0, w), randint(0, h)),
-            (15, 25),
-            pallette[randint(0, len(pallette) - 1)],
-        )
-        t.append(b)
-    run = True
-    while run:
+
+    boid_map = Hash_Map(60, WIDTH)
+    boid_group = pygame.sprite.Group()
+    generate_flock(
+        (WIDTH, HEIGHT), (0, 0), COLOR_PALLETTE, 0, boid_map, boid_group, NUM_BOIDS
+    )
+
+    print(len(boid_group))
+
+    while True:
         clock.tick(FPS)
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
-                run = False
+                return False
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
-                    run = False
-        screen.fill(bgColor)
-        current = pygame.time.get_ticks()
-        if current - last_update >= 5:
-            Q = QUADTREE((0, 0), (w, h), 6)
-            for boid in t:
-                Q._insert(boid)
-        for boid in t:
-            S = OBJ((boid.pos[0] - 63, boid.pos[1] - 63), (123, 123))
-            boid.update([b for i, b in enumerate(t) if S._contains(b)][:10], 50, w, h)
-            boid.draw(screen)
-        pygame.display.flip()
+                    return False
+
+        display.fill(BG_COLOR)
+
+        boid_group.draw(display)
+        boid_group.update(boid_map, display)
+
+        pygame.display.update()
 
 
 if __name__ == "__main__":
     main()
+    pygame.quit()
+    exit()
