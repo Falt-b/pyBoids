@@ -210,8 +210,6 @@ def main():
         (WIDTH, HEIGHT), (0, 0), COLOR_PALLETTE, 0, boid_map, boid_group, NUM_BOIDS
     )
 
-    print(len(boid_group))
-
     while True:
         clock.tick(FPS)
         for event in pygame.event.get():
